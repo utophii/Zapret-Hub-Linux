@@ -13,6 +13,46 @@ from typing import Any, Callable, Iterable
 
 _SERVICE_RE = re.compile(r"^[A-Za-z0-9_.@-]+$")
 
+# Privileged helper installed by scripts/install_linux_system.sh. It rewrites
+# only the Hub-managed block of /opt/zapret2/config (see packaging/linux/).
+ZAPRET2_CONFIG_HELPER = "/usr/local/libexec/zapret-hub-zapret2-config"
+DEFAULT_TCP_PORTS = "80,443"
+DEFAULT_UDP_PORTS = "443"
+_PORT_TOKEN_RE = re.compile(r"(\d{1,5})(?:-(\d{1,5}))?")
+_MANAGED_BEGIN = "# >>> zapret-hub managed ports (generated; do not edit) >>>"
+_MANAGED_END = "# <<< zapret-hub managed ports <<<"
+
+
+def normalize_ports(value: str, fallback: str) -> str:
+    """Normalize "80, 443;50000-50100" into "80,443,50000-50100" (drops junk)."""
+    tokens: list[str] = []
+    for raw in re.split(r"[\s,;]+", str(value or "")):
+        match = _PORT_TOKEN_RE.fullmatch(raw.strip())
+        if not match:
+            continue
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if start > end:
+            start, end = end, start
+        if start < 1 or end > 65535:
+            continue
+        tokens.append(str(start) if start == end else f"{start}-{end}")
+    return ",".join(dict.fromkeys(tokens)) or fallback
+
+
+def managed_ports(config_text: str) -> tuple[str, str] | None:
+    """Read the ports from the Hub-managed block of the zapret2 config, if any."""
+    start = config_text.find(_MANAGED_BEGIN)
+    if start < 0:
+        return None
+    end = config_text.find(_MANAGED_END, start)
+    block = config_text[start:end] if end > start else config_text[start:]
+    tcp = re.search(r"^NFQWS2_PORTS_TCP=(\S+)$", block, re.MULTILINE)
+    udp = re.search(r"^NFQWS2_PORTS_UDP=(\S+)$", block, re.MULTILINE)
+    if not tcp or not udp:
+        return None
+    return tcp.group(1), udp.group(1)
+
 
 @dataclass(frozen=True, slots=True)
 class LinuxServiceResult:
@@ -40,7 +80,9 @@ class LinuxZapret2Service:
         which: Callable[[str], str | None] = shutil.which,
         geteuid: Callable[[], int] | None = getattr(os, "geteuid", None),
         platform_name: str = sys.platform,
+        config_helper: str | Path = ZAPRET2_CONFIG_HELPER,
     ) -> None:
+        self._config_helper = Path(config_helper)
         configured_service = str(
             service_name or os.environ.get("ZAPRET_HUB_ZAPRET2_SERVICE", "zapret2.service")
         ).strip()
@@ -111,6 +153,59 @@ class LinuxZapret2Service:
     def stop(self, *, dry_run: bool = False) -> LinuxServiceResult:
         return self._control("stop", dry_run=dry_run)
 
+    def restart(self, *, dry_run: bool = False) -> LinuxServiceResult:
+        return self._control("restart", dry_run=dry_run)
+
+    def sync_ports(self, tcp_ports: str, udp_ports: str, *, dry_run: bool = False) -> LinuxServiceResult:
+        """Make /opt/zapret2/config match the Hub's TCP/UDP port settings.
+
+        zapret2.service builds its nftables rules and nfqws2 command line from
+        that file, so port settings stored only in the Hub have no effect.
+        Returns "unchanged" when nothing needs writing, "applied" after the
+        config was rewritten (the service must be restarted to pick it up),
+        "planned" for dry runs and "error" otherwise.
+        """
+        if not self.supported:
+            return LinuxServiceResult("unsupported", "Linux backend is only available on Linux", self.service_name)
+        tcp = normalize_ports(tcp_ports, DEFAULT_TCP_PORTS)
+        udp = normalize_ports(udp_ports, DEFAULT_UDP_PORTS)
+        root = self.discover_root()
+        config = (root / "config") if root is not None else None
+        if config is None or not config.is_file():
+            return LinuxServiceResult("error", "zapret2 config was not found (expected /opt/zapret2/config)", self.service_name)
+        try:
+            current = config.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            return LinuxServiceResult("error", f"cannot read {config}: {error}", self.service_name)
+        managed = managed_ports(current)
+        wanted = (tcp, udp)
+        if managed == wanted or (managed is None and wanted == (DEFAULT_TCP_PORTS, DEFAULT_UDP_PORTS)):
+            return LinuxServiceResult("unchanged", service=self.service_name)
+        if not self._config_helper.is_file():
+            return LinuxServiceResult(
+                "error",
+                f"{self._config_helper} is missing; re-run ./install.sh to install the port helper",
+                self.service_name,
+            )
+        command = [str(self._config_helper), tcp, udp]
+        if not self._is_root():
+            pkexec = self._which("pkexec")
+            if not pkexec:
+                return LinuxServiceResult(
+                    "error",
+                    "pkexec was not found; install the pkexec package or run the Hub as root",
+                    self.service_name,
+                    tuple(command),
+                )
+            command.insert(0, pkexec)
+        if dry_run:
+            return LinuxServiceResult("planned", service=self.service_name, command=tuple(command))
+        result = self._run(command, timeout=60)
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "port helper failed").strip()
+            return LinuxServiceResult("error", message, self.service_name, tuple(command), result.returncode)
+        return LinuxServiceResult("applied", service=self.service_name, command=tuple(command), returncode=0)
+
     def diagnose(self) -> dict[str, Any]:
         root = self.discover_root()
         nfqws2 = self.find_nfqws2(root)
@@ -163,7 +258,7 @@ class LinuxZapret2Service:
         if result.returncode != 0:
             message = (result.stderr or result.stdout or f"systemctl {action} failed").strip()
             return LinuxServiceResult("error", message, self.service_name, tuple(command), result.returncode)
-        expected = "running" if action == "start" else "stopped"
+        expected = "stopped" if action == "stop" else "running"
         observed = self.status()
         if observed.status != expected:
             return LinuxServiceResult(

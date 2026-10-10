@@ -2030,7 +2030,28 @@ foreach ($adapter in @($payload.adapters)) {
     def _start_linux_zapret2(self, component_id: str) -> ComponentState:
         if self._linux_zapret2 is None:
             return ComponentState(component_id=component_id, status="error", last_error="Linux backend is unavailable")
-        result = self._linux_zapret2.start()
+        # zapret2.service takes its ports (nftables rules) and profiles from
+        # /opt/zapret2/config, so push the Hub's port settings there first.
+        settings = self.settings.get()
+        sync = self._linux_zapret2.sync_ports(
+            getattr(settings, "zapret2_tcp_ports", ""),
+            getattr(settings, "zapret2_udp_ports", ""),
+        )
+        if sync.status == "error":
+            self.logging.log("error", "Could not apply Zapret2 ports to /opt/zapret2/config", error=sync.message)
+        elif sync.status == "applied":
+            self.logging.log(
+                "info",
+                "Applied Zapret2 ports to /opt/zapret2/config",
+                tcp=getattr(settings, "zapret2_tcp_ports", ""),
+                udp=getattr(settings, "zapret2_udp_ports", ""),
+            )
+        # `systemctl start` is a no-op for a running unit, so restart it when
+        # the config changed underneath an already-running service.
+        if sync.status == "applied" and self._linux_zapret2.status().status == "running":
+            result = self._linux_zapret2.restart()
+        else:
+            result = self._linux_zapret2.start()
         state = ComponentState(
             component_id=component_id,
             status=result.status if result.status in {"running", "stopped"} else "error",

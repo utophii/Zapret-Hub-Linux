@@ -488,10 +488,12 @@ export function SettingsModal({
               )}
             </div>
           </Section>
-          <Section title="winws2">
-            <Row label="TCP ports" hint="--wf-tcp-out (Discord media ports merge automatically)"><input disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.tcpPorts} onChange={(event) => patch({ zapret2: { ...settings.zapret2, tcpPorts: event.target.value } })} className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`} /></Row>
-            <Row label="UDP ports" hint="--wf-udp-out (Discord voice ports merge automatically)"><input disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.udpPorts} onChange={(event) => patch({ zapret2: { ...settings.zapret2, udpPorts: event.target.value } })} className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`} /></Row>
+          <Section title={isLinux ? "nfqws2" : "winws2"}>
+            <Row label="TCP ports" hint={isLinux ? "NFQWS2_PORTS_TCP (/opt/zapret2/config)" : "--wf-tcp-out (Discord media ports merge automatically)"}><input disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.tcpPorts} onChange={(event) => patch({ zapret2: { ...settings.zapret2, tcpPorts: event.target.value } })} className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`} /></Row>
+            <Row label="UDP ports" hint={isLinux ? "NFQWS2_PORTS_UDP (/opt/zapret2/config)" : "--wf-udp-out (Discord voice ports merge automatically)"}><input disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.udpPorts} onChange={(event) => patch({ zapret2: { ...settings.zapret2, udpPorts: event.target.value } })} className={`${inputClass} disabled:cursor-not-allowed disabled:opacity-50`} /></Row>
+            {!isLinux && (
             <Row label="WinDivert filter" hint={L("Дополнительный фильтр --wf-raw-part", "Additional --wf-raw-part filter")}><textarea disabled={(settings.zapret2.controlMode ?? "manual") === "auto"} value={settings.zapret2.rawFilter} onChange={(event) => patch({ zapret2: { ...settings.zapret2, rawFilter: event.target.value } })} className="h-16 w-[250px] resize-none rounded-[10px] border border-line-1 bg-bg-1 p-2.5 text-[11px] text-fg outline-none focus:border-line-2 disabled:cursor-not-allowed disabled:opacity-50" /></Row>
+            )}
           </Section>
           <Section title="Lua desync">
             <Row label={L("Профиль Lua", "Lua profile")} hint={L("Hub-стратегия для Manual и Auto (hot-reload без рестарта).", "Hub strategy for Manual and Auto (hot-reload, no restart).")}>

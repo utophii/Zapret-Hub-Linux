@@ -1,11 +1,11 @@
 * debian,ubuntu :
 
-apt install make gcc zlib1g-dev libcap-dev libnetfilter-queue-dev libmnl-dev libsystemd-dev libluajit2-5.1-dev
+apt install make gcc zlib1g-dev libcap-dev libnetfilter-queue-dev libmnl-dev libsystemd-dev libluajit-5.1-dev
 make -C /opt/zapret2 systemd
 
 * fedora, rhel, centos, alma
 
-dnf add make gcc zlib-devel libcap-devel libnetfilter_queue-devel libmnl-devel systemd-devel luajit-devel
+dnf install make gcc zlib-ng-compat-devel libcap-devel libnetfilter_queue-devel libmnl-devel systemd-devel luajit-devel
 make -C /opt/zapret2 systemd
 
 * linux static :

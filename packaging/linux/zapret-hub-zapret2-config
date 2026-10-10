@@ -1,0 +1,168 @@
+#!/usr/bin/python3
+"""Apply Zapret Hub port settings to /opt/zapret2/config (runs as root).
+
+Zapret Hub on Linux does not launch nfqws2 itself: zapret2.service reads
+/opt/zapret2/config, builds the nftables rules from NFQWS2_PORTS_TCP/UDP and
+runs nfqws2 with NFQWS2_OPT.  This helper is the only privileged piece that
+lets the Hub change those values.  It is started through pkexec and the
+PolicyKit rule only accepts two numeric arguments, so it can do nothing
+except rewrite one clearly marked block at the end of the config file.
+
+Usage: zapret-hub-zapret2-config <tcp-ports> <udp-ports>
+Example: zapret-hub-zapret2-config 80,443 443,19294-19344,50000-50100
+
+Prints "changed" or "unchanged" on success.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import stat
+import sys
+import tempfile
+
+CONFIG_PATH = "/opt/zapret2/config"
+
+BEGIN = "# >>> zapret-hub managed ports (generated; do not edit) >>>"
+END = "# <<< zapret-hub managed ports <<<"
+
+DEFAULT_TCP = "80,443"
+DEFAULT_UDP = "443"
+
+MAX_ARG_LEN = 256
+_TOKEN_RE = re.compile(r"(\d{1,5})(?:-(\d{1,5}))?")
+_BLOCK_RE = re.compile(
+    r"^" + re.escape(BEGIN) + r"\n.*?^" + re.escape(END) + r"[ \t]*(?:\n|\Z)",
+    re.DOTALL | re.MULTILINE,
+)
+
+# Same desync recipes upstream ships in config.default / custom.d examples.
+TLS_PROFILE = (
+    "--filter-tcp={ports} --filter-l7=tls <HOSTLIST> --payload=tls_client_hello "
+    "--lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000 "
+    "--lua-desync=multidisorder:pos=1,midsld"
+)
+UDP_VOICE_PROFILE = (
+    "--filter-udp={ports} --filter-l7=discord,stun --payload=stun,discord_ip_discovery "
+    "--lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2"
+)
+
+
+def normalize_ports(value: str) -> list[str]:
+    """Validate a port list strictly; raise ValueError on anything unexpected."""
+    value = str(value or "").strip()
+    if not value or len(value) > MAX_ARG_LEN:
+        raise ValueError("port list is empty or too long")
+    tokens: list[str] = []
+    for raw in value.split(","):
+        match = _TOKEN_RE.fullmatch(raw.strip())
+        if not match:
+            raise ValueError(f"invalid port token: {raw!r}")
+        start = int(match.group(1))
+        end = int(match.group(2) or start)
+        if start > end:
+            start, end = end, start
+        if start < 1 or end > 65535:
+            raise ValueError(f"port out of range: {raw!r}")
+        token = str(start) if start == end else f"{start}-{end}"
+        if token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def render_block(tcp: list[str], udp: list[str]) -> str:
+    """Return the managed block, or "" when upstream defaults are requested."""
+    if ",".join(tcp) == DEFAULT_TCP and ",".join(udp) == DEFAULT_UDP:
+        return ""
+    extra_tcp = [token for token in tcp if token not in {"80", "443"}]
+    extra_udp = [token for token in udp if token != "443"]
+    lines = [
+        BEGIN,
+        f"NFQWS2_PORTS_TCP={','.join(tcp)}",
+        f"NFQWS2_PORTS_UDP={','.join(udp)}",
+    ]
+    profiles: list[str] = []
+    if extra_tcp:
+        profiles.append(TLS_PROFILE.format(ports=",".join(extra_tcp)))
+    if extra_udp:
+        profiles.append(UDP_VOICE_PROFILE.format(ports=",".join(extra_udp)))
+    if profiles:
+        # config.default defines NFQWS2_OPT; extend it, never replace it, so the
+        # stock HTTP/TLS/QUIC profiles and any user additions stay intact.
+        lines.append('NFQWS2_OPT="$NFQWS2_OPT')
+        lines.extend(f"--new {profile}" for profile in profiles)
+        lines.append('"')
+    lines.append(END)
+    return "\n".join(lines) + "\n"
+
+
+def strip_block(text: str) -> str:
+    begins = text.count(BEGIN)
+    ends = text.count(END)
+    if begins != ends or begins > 1:
+        raise ValueError("managed block markers are damaged; fix /opt/zapret2/config by hand")
+    return _BLOCK_RE.sub("", text)
+
+
+def build_config(text: str, tcp: list[str], udp: list[str]) -> str:
+    base = strip_block(text).rstrip("\n")
+    block = render_block(tcp, udp)
+    if not block:
+        return base + "\n" if base else ""
+    return (base + "\n\n" if base else "") + block
+
+
+def apply(config_path: str, tcp_arg: str, udp_arg: str) -> bool:
+    """Rewrite config_path. Returns True if the file content changed."""
+    tcp = normalize_ports(tcp_arg)
+    udp = normalize_ports(udp_arg)
+    with open(config_path, "r", encoding="utf-8") as handle:
+        old = handle.read()
+    new = build_config(old, tcp, udp)
+    if new == old:
+        return False
+    info = os.stat(config_path)
+    directory = os.path.dirname(config_path)
+    fd, tmp_path = tempfile.mkstemp(prefix=".config.zapret-hub.", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(new)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_path, stat.S_IMODE(info.st_mode))
+        try:
+            os.chown(tmp_path, info.st_uid, info.st_gid)
+        except PermissionError:
+            pass  # not root (tests); ownership is irrelevant there
+        os.replace(tmp_path, config_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return True
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) != 3:
+        print("usage: zapret-hub-zapret2-config <tcp-ports> <udp-ports>", file=sys.stderr)
+        return 2
+    try:
+        changed = apply(CONFIG_PATH, argv[1], argv[2])
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 3
+    except FileNotFoundError:
+        print(f"error: {CONFIG_PATH} was not found", file=sys.stderr)
+        return 4
+    except OSError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 5
+    print("changed" if changed else "unchanged")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

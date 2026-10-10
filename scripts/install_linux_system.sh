@@ -57,6 +57,8 @@ ZAPRET_SOURCE="$PROJECT_ROOT/runtime/zapret2"
 CLASSIC_HELPER="$PROJECT_ROOT/scripts/install_linux_classic_zapret.sh"
 HAPP_HELPER="$PROJECT_ROOT/scripts/install_linux_happ.sh"
 POLKIT_SOURCE="$PROJECT_ROOT/packaging/polkit/49-zapret-hub.rules"
+PORT_HELPER_SOURCE="$PROJECT_ROOT/packaging/linux/zapret-hub-zapret2-config"
+PORT_HELPER_TARGET=/usr/local/libexec/zapret-hub-zapret2-config
 HOSTLIST_SOURCE="$PROJECT_ROOT/packaging/linux/zapret-hosts-user.txt"
 
 for required in \
@@ -101,6 +103,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     echo "[dry-run] install bundled Zapret2 in /opt/zapret2 (preserve foreign installs)"
     if zh_is_systemd; then
         echo "[dry-run] install zapret2.service without starting or restarting it"
+        echo "[dry-run] install $PORT_HELPER_TARGET (applies Zapret2 port settings to /opt/zapret2/config)"
         echo "[dry-run] install /etc/polkit-1/rules.d/49-zapret-hub.rules"
     else
         echo "[dry-run] systemd not found; skip service units and the PolicyKit rule"
@@ -197,6 +200,8 @@ if zh_is_systemd; then
             "$ZAPRET_SOURCE/init.d/systemd/zapret2.service" \
             /etc/systemd/system/zapret2.service
     fi
+    install -d -o root -g root -m 0755 /usr/local/libexec
+    install -o root -g root -m 0755 "$PORT_HELPER_SOURCE" "$PORT_HELPER_TARGET"
     install -d -o root -g root -m 0755 /etc/polkit-1/rules.d
     install -o root -g root -m 0644 \
         "$POLKIT_SOURCE" \

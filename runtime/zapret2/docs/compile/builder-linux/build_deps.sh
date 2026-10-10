@@ -16,8 +16,10 @@ dl_deps()
 		curl $CURL_OPT -Lo - https://www.netfilter.org/pub/libmnl/libmnl-1.0.5.tar.bz2 | tar -xj || exit 5
 	exists_dir libnetfilter_queue-* ||
 		curl $CURL_OPT -Lo - https://www.netfilter.org/pub/libnetfilter_queue/libnetfilter_queue-1.0.5.tar.bz2 | tar -xj || exit 5
-	exists_dir zlib-* ||
-		curl $CURL_OPT -Lo - https://zlib.net/fossils/zlib-1.3.2.tar.gz | tar -xz || exit 5
+	exists_dir zlib-ng-${ZLIB_NG_VER} ||
+		curl $CURL_OPT -Lo - https://github.com/zlib-ng/zlib-ng/archive/refs/tags/${ZLIB_NG_VER}.tar.gz | tar -xz || exit 5
+	exists_dir zlib-${ZLIB_VER} ||
+		curl $CURL_OPT -Lo - https://zlib.net/fossils/zlib-${ZLIB_VER}.tar.gz | tar -xz || exit 5
 	exists_dir luajit2-* ||
 		curl $CURL_OPT -Lo - https://github.com/openresty/luajit2/archive/refs/tags/v${LUAJIT_RELEASE}.tar.gz | tar -xz || exit 5
 	exists_dir lua-* ||
@@ -42,11 +44,15 @@ build_netlink()
 build_zlib()
 {
 (
-cd zlib-*
+if [ "$ZLIB_NG" = 1 ]; then
+	cd zlib-ng-${ZLIB_NG_VER}
+else
+	cd zlib-${ZLIB_VER}
+fi
 [ -f "Makefile" ] && make clean
 CFLAGS="$OPTIMIZE $MINSIZE $CFLAGS" \
 LDFLAGS="$LDMINSIZE $LDFLAGS" \
-./configure --prefix= --static
+./configure --prefix= --static --zlib-compat
 make install -j$nproc DESTDIR=$STAGING_DIR
 )
 }
@@ -107,8 +113,8 @@ for t in $TGT; do
 	CFLAGS="$CFLAGS $CFLAGS_PIC"
 	pushd "$DEPS"
 	install_h_files
-	build_netlink
 	build_zlib
+	build_netlink
 	build_lua
 	build_luajit_for_target $t
 	popd
